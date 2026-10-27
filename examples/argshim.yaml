@@ -1,0 +1,112 @@
+# argshim example configuration.
+#
+# Place it next to the wrapper as `<wrapper-name>.argshim.yaml` or `argshim.yaml`,
+# or point ARGSHIM_CONFIG at it.
+#
+# Strings may reference the wrapper's environment:
+#   ${env:VAR}            value of VAR (empty if unset)
+#   ${env:VAR:-default}   value of VAR or "default"
+#   $${env:VAR}           literal "${env:VAR}"
+
+# Real executable: absolute path, path relative to this file, or a bare name
+# looked up in PATH (the wrapper itself is skipped). Override: ARGSHIM_TARGET.
+target: ${env:MYAPP_REAL_BIN:-myapp-real}
+
+# Pass the original argv[0] to the target (Unix only).
+preserve_argv0: false
+
+# Remove ARGSHIM_* variables before starting the target.
+strip_own_env: true
+
+# Optional diagnostics file; never touches stdout/stderr.
+# log_file: /tmp/argshim.log
+
+# Rules are applied top to bottom; each one sees the result of the previous.
+rules:
+  # ---------------------------------------------------------------- env ---
+  - name: drop-realm-vars
+    on: env
+    action: remove
+    match: "REALM_NAME_*"            # glob: * and ? are wildcards
+
+  - name: proxy-off-for-internal
+    on: env
+    action: remove
+    match: "re:^(?i)(http|https)_proxy$"   # "re:" prefix = regular expression
+    when:
+      env_match:
+        TARGET_HOST: "*.internal"
+
+  - name: tool-dir-in-path
+    on: env
+    action: add
+    key: PATH
+    value: ["/opt/myapp/bin", "/opt/myapp/tools"]   # list is joined with `separator`
+    if_exists: prepend                 # overwrite | skip | append | prepend
+    # separator: ":"                   # default: ":" on Unix, ";" on Windows
+
+  - name: default-log-level
+    on: env
+    action: add
+    key: MYAPP_LOG
+    value: info
+    if_exists: skip
+
+  - name: rename-legacy-vars
+    on: env
+    action: replace
+    match: "LEGACY_*"
+    rename: "MYAPP_${1}"               # captures of `match` are available
+    regex: "^http://(.*)$"             # optional: also rewrite the value
+    replacement: "https://$1"
+
+  # -------------------------------------------------------------- args ---
+  - name: strip-insecure
+    on: arg
+    action: remove
+    match: "--insecure"
+
+  - name: strip-token
+    on: arg
+    action: remove
+    match: "--token"
+    with_value: true                   # also drop the next argument ("--token X")
+
+  - name: config-first
+    on: arg
+    action: add
+    value: ["--config", "/etc/myapp/config.toml"]
+    position: start                    # start | end | <index> | {before: P} | {after: P}
+    when:
+      arg_absent: ["--config", "-c"]
+
+  - name: before-double-dash
+    on: arg
+    action: add
+    value: "--no-telemetry"
+    position: { before: "--" }
+    fallback: end                      # when the anchor is missing: start | end | skip
+
+  - name: rename-flag
+    on: arg
+    action: replace
+    match: "--old-*"
+    value: "--new-${1}"                # whole argument replaced by template
+
+  - name: force-https
+    on: arg
+    action: replace
+    match: "--url"
+    scope: value                       # `--url=X` and `--url X` both handled
+    regex: "^http://(.*)$"
+    replacement: "https://$1"
+
+  - name: debug-to-trace-on-ci
+    on: arg
+    action: replace
+    match: "-v"
+    match_on: full                     # key (default) | full
+    value: ["--log-level", "trace"]    # one argument -> several
+    when:
+      env_set: CI
+      os: [linux, macos]
