@@ -72,6 +72,8 @@ enum Op {
         pattern: Pattern,
         match_on: MatchOn,
         with_value: bool,
+        scope: ArgScope,
+        value_regex: Option<Regex>,
     },
     ArgReplace {
         pattern: Pattern,
@@ -271,17 +273,25 @@ fn compile_one(d: &RuleDef, name: String) -> Result<Rule, String> {
                     ("fallback", d.fallback.is_some()),
                     ("if_exists", d.if_exists.is_some()),
                     ("separator", d.separator.is_some()),
-                    ("regex", d.regex.is_some()),
                     ("replacement", d.replacement.is_some()),
                     ("rename", d.rename.is_some()),
-                    ("scope", d.scope.is_some()),
                 ],
                 &ctx,
             )?;
+            if d.scope.is_some() && d.regex.is_none() {
+                return Err("`scope` requires `regex` for arg/remove".into());
+            }
+            let value_regex = d
+                .regex
+                .as_deref()
+                .map(|r| Regex::new(r).map_err(|e| format!("invalid `regex`: {e}")))
+                .transpose()?;
             Op::ArgRemove {
                 pattern: pattern()?,
                 match_on,
                 with_value: d.with_value.unwrap_or(false),
+                scope: d.scope.unwrap_or(ArgScope::Arg),
+                value_regex,
             }
         }
         (On::Arg, Action::Replace) => {
@@ -361,6 +371,16 @@ fn arg_key(a: &str) -> &str {
 
 fn has_inline_value(a: &str) -> bool {
     a.starts_with('-') && a.contains('=')
+}
+
+/// The value belonging to argument `args[i]`: the inline part after `=`, or
+/// the following argument. `None` if there is no value at all.
+fn arg_value<'a>(args: &'a [OsString], i: usize, s: &'a str) -> Option<&'a str> {
+    if has_inline_value(s) {
+        s.split_once('=').map(|(_, v)| v)
+    } else {
+        args.get(i + 1).and_then(|a| a.to_str())
+    }
 }
 
 fn subject(a: &str, m: MatchOn) -> &str {
@@ -576,6 +596,8 @@ impl Op {
                 pattern,
                 match_on,
                 with_value,
+                scope,
+                value_regex,
             } => {
                 let args = std::mem::take(&mut st.args);
                 let mut out = Vec::with_capacity(args.len());
@@ -583,7 +605,18 @@ impl Op {
                 let mut i = 0;
                 while i < args.len() {
                     if let Some(s) = args[i].to_str() {
-                        if pattern.is_match(subject(s, *match_on)) {
+                        let matches = pattern.is_match(subject(s, *match_on))
+                            && match value_regex {
+                                None => true,
+                                Some(re) => {
+                                    let checked = match scope {
+                                        ArgScope::Arg => Some(s),
+                                        ArgScope::Value => arg_value(&args, i, s),
+                                    };
+                                    checked.is_some_and(|v| re.is_match(v))
+                                }
+                            };
+                        if matches {
                             changed = true;
                             i += if *with_value && !has_inline_value(s) && i + 1 < args.len() {
                                 2
@@ -783,6 +816,25 @@ mod tests {
     }
 
     #[test]
+    fn arg_remove_value_filter() {
+        // only drop `-v` mounts whose value starts with /opt/build
+        let st = run(
+            "  - { on: arg, action: remove, match: '-v', scope: value, regex: '^/opt/build', with_value: true }",
+            &["-v", "/opt/buildagent:/opt/buildagent:ro", "-v", "/data:/data", "run"],
+            &[],
+        );
+        assert_eq!(args(&st), ["-v", "/data:/data", "run"]);
+
+        // inline `-v=value` form: only the single token is dropped
+        let st = run(
+            "  - { on: arg, action: remove, match: '-v', scope: value, regex: '^/opt/' }",
+            &["-v=/opt/x", "-v=/data", "run"],
+            &[],
+        );
+        assert_eq!(args(&st), ["-v=/data", "run"]);
+    }
+
+    #[test]
     fn arg_replace() {
         // whole-argument template with glob captures
         let st = run(
@@ -871,6 +923,7 @@ mod tests {
             "  - { on: arg, action: add, value: x, match: a }",
             "  - { on: arg, action: replace, match: a, value: b, regex: c }",
             "  - { on: arg, action: replace, match: 're:[', value: b }",
+            "  - { on: arg, action: remove, match: a, scope: value }",
         ];
         for b in bad {
             let cfg = parse_str(&format!("target: x\nrules:\n{b}")).unwrap();

@@ -107,6 +107,27 @@ rules:
     }
 
     #[test]
+    fn args_removed_by_value() {
+        let cfg = r#"
+target: sh
+rules:
+  - { on: arg, action: add, value: ['-c', 'printf "%s|" "$@"', sh], position: start }
+  - { on: arg, action: remove, match: '-v', scope: value, regex: '^/opt/build', with_value: true }
+"#;
+        let o = wrapper(cfg)
+            .args([
+                "-v",
+                "/opt/buildagent:/opt/buildagent:ro",
+                "-v",
+                "/data:/data",
+                "run",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(stdout(&o), "-v|/data:/data|run|");
+    }
+
+    #[test]
     fn env_is_rewritten() {
         let cfg = r#"
 target: env

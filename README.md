@@ -273,6 +273,22 @@ Indexes count user arguments (not `argv[0]`): `0` = first, `-1` = end,
                                  # `--token=SECRET` is a single argument anyway
 ```
 
+`match` always selects the flag (by key or full argument, see `match_on`). To
+also require the **value** to match before removing, add `scope: value` and a
+`regex` (same syntax as `replace`'s `regex`, applied to the text after `=` or
+the following argument):
+
+```yaml
+# only drop `-v` mounts pointing into /opt/build*
+- on: arg
+  action: remove
+  match: "-v"
+  scope: value                   # arg (default): test `regex` against the
+                                 # argument itself; value: against its value
+  regex: "^/opt/build"
+  with_value: true
+```
+
 #### `arg` / `replace`
 
 Exactly one of `value` or `regex`:
